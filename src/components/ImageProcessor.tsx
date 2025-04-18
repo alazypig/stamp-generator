@@ -191,6 +191,13 @@ const ImageProcessor: React.FC<ImageProcessorProps> = ({ image }) => {
       let dst = new cv.Mat();
       let gray = new cv.Mat();
 
+      // Step 0: Downscale input to lower pixel resolution
+      const pixelScaleFactor = 0.6; // 50% resolution (adjust to lower pixels)
+      if (src.cols > 800 || src.rows > 800) {
+        const lowResSize = new cv.Size(Math.round(src.cols * pixelScaleFactor), Math.round(src.rows * pixelScaleFactor));
+        cv.resize(src, src, lowResSize, 0, 0, cv.INTER_AREA); // Downscale src
+      }
+
       // Step 1: Convert to grayscale
       cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
@@ -225,50 +232,45 @@ const ImageProcessor: React.FC<ImageProcessorProps> = ({ image }) => {
       dst = new cv.Mat();
 
       // Step 4: Halftoning with ordered dithering
-      const dots = new cv.Mat(gray.rows, gray.cols, cv.CV_8UC1, new cv.Scalar(255));
-      // 4x4 Bayer matrix, normalized to 0-255
+      const scaleFactor = 0.5; // Downscale to 50% to reduce dot density
+      const smallSize = new cv.Size(Math.round(gray.cols * scaleFactor), Math.round(gray.rows * scaleFactor));
+      const smallGray = new cv.Mat();
+      cv.resize(gray, smallGray, smallSize, 0, 0, cv.INTER_AREA); // Downscale gray
+
+      const dots = new cv.Mat(smallGray.rows, smallGray.cols, cv.CV_8UC1, new cv.Scalar(255));
+      // 4x4 clustered dot matrix, normalized to 0-255
       const bayer = new Float32Array([
         0, 8, 2, 10,
         12, 4, 14, 6,
         3, 11, 1, 9,
         15, 7, 13, 5
       ].map(x => (x / 16) * 255));
-      for (let y = 0; y < gray.rows; y++) {
-        for (let x = 0; x < gray.cols; x++) {
+      for (let y = 0; y < smallGray.rows; y++) {
+        for (let x = 0; x < smallGray.cols; x++) {
           const threshold = bayer[(y % 4) * 4 + (x % 4)];
-          dots.data[y * dots.cols + x] = gray.data[y * gray.cols + x] > threshold ? 255 : 0;
+          dots.data[y * dots.cols + x] = smallGray.data[y * smallGray.cols + x] > threshold ? 255 : 0;
         }
       }
 
-      // Step 5: Edge Detection
-      let edges = new cv.Mat();
-      const denseSparseValue = params.denseSparse / 100; // 0 (dense) to 1 (sparse)
-      const lowThreshold = 50 * (1 - denseSparseValue); // 0 to 50
-      const highThreshold = 150 * (1 - denseSparseValue); // 0 to 150
-      cv.Canny(gray, edges, lowThreshold, highThreshold);
-      cv.bitwise_not(edges, edges); // Black outlines
+      // Enlarge black dots with dilation, controlled by Thick/Thin
+      const dotKernelSize = Math.round(1 + 2 * (params.thickThin / 100)); // 1 to 3
+      const dotKernel = cv.getStructuringElement(
+        cv.MORPH_RECT,
+        new cv.Size(dotKernelSize, dotKernelSize)
+      );
+      cv.dilate(dots, dots, dotKernel); // Enlarge black dots (0 values)
+      dotKernel.delete();
 
-      // Step 6: Thicken outlines
-      const thickThinValue = params.thickThin / 100; // 0 (thin) to 1 (thick)
-      if (thickThinValue > 0.5) {
-        const kernelSize = Math.round(3 + 4 * thickThinValue); // 3 to 7
-        const kernel = cv.getStructuringElement(
-          cv.MORPH_RECT,
-          new cv.Size(kernelSize, kernelSize)
-        );
-        cv.dilate(edges, dst, kernel);
-        kernel.delete();
-        edges.delete();
-        edges = dst;
-        dst = new cv.Mat();
-      }
+      // Upscale dots back to original size
+      const fullSize = new cv.Size(gray.cols, gray.rows);
+      cv.resize(dots, dots, fullSize, 0, 0, cv.INTER_NEAREST); // Keep binary look
 
-      // Step 7: Combine halftone dots with edges
-      cv.bitwise_and(dots, edges, dst);
-      dots.delete();
-      edges.delete();
+      smallGray.delete();
 
-      // Step 8: Convert to RGBA for display
+      // Step 5: Use halftone dots directly (no edges)
+      dst = dots; // Pass dots to output
+
+      // Step 6: Convert to RGBA for display
       cv.cvtColor(dst, dst, cv.COLOR_GRAY2RGBA);
 
       // Clean up
@@ -354,8 +356,8 @@ const ImageProcessor: React.FC<ImageProcessorProps> = ({ image }) => {
           onClick={() => {
             setParams({
               smoothSharp: 39,
-              lightDark: 39,
-              thickThin: 39,
+              lightDark: 21,
+              thickThin: 21,
               denseSparse: 61
             })
             setFilter({ ...filter, type: 'comic' })
